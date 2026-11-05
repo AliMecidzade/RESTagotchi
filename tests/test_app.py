@@ -6,13 +6,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 from app import app
 
-@pytest.fixture
-def client():
-    app.config["TESTING"] = True
-    with app.test_client() as client:
-        yield client
-
-def test_index(client):
+def test_index_route():
+    client = app.test_client()
     response = client.get("/")
     assert response.status_code == 200
+    assert b"RESTagotchi API is ready!" in response.data
+
+def test_pet_route():
+    client = app.test_client()
+    response = client.get("/pet/Ali")
+    assert response.status_code == 200
+    assert b"Pet Ali is doing great!" in response.data
 
