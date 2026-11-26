@@ -32,6 +32,14 @@ def create_app(
     def index():
         return jsonify({"status": "alive", "message": "RESTagotchi API is ready!"})
 
+    @app.get("/status")
+    def status():
+        return jsonify({"hunger": 50, "happiness": 50, "is_alive": True})
+
+    @app.get("/pet/<name>")
+    def pet_info(name):
+        return jsonify({"message": f"Pet {name} is doing great!", "owner": "Team"})
+
     @app.get("/actions")
     def list_actions():
         return jsonify(service.list_actions())
