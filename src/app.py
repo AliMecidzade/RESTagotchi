@@ -3,7 +3,14 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request
 
-from domain import Clock, InvalidPetNameError, Pet, PetNotFoundError, UnknownActionError
+from domain import (
+    Clock,
+    FoodError,
+    InvalidPetNameError,
+    Pet,
+    PetNotFoundError,
+    UnknownActionError,
+)
 from repository import JsonPetRepository, PetRepository
 from service import PetService
 
@@ -44,6 +51,10 @@ def create_app(
     def list_actions():
         return jsonify(service.list_actions())
 
+    @app.get("/foods")
+    def list_foods():
+        return jsonify(service.list_foods())
+
     @app.post("/pets")
     def create_pet():
         body = request.get_json(silent=True)
@@ -69,13 +80,24 @@ def create_app(
 
     @app.post("/pets/<pet_id>/actions/<action_name>")
     def perform_action(pet_id, action_name):
+        body = request.get_json(silent=True)
+        filename = body.get("file") if isinstance(body, dict) else None
         try:
-            pet = service.perform_action(pet_id, action_name.strip().lower())
+            pet, meal = service.perform_action(
+                pet_id,
+                action_name.strip().lower(),
+                filename=filename,
+            )
         except PetNotFoundError:
             return jsonify({"error": "Pet not found"}), 404
         except UnknownActionError:
             return jsonify({"error": "Unknown action"}), 400
-        return jsonify(pet_resource(pet))
+        except FoodError as exc:
+            return jsonify({"error": str(exc)}), 400
+        payload = pet_resource(pet)
+        if meal is not None:
+            payload["meal"] = meal
+        return jsonify(payload)
 
     return app
 

@@ -94,6 +94,94 @@ class TimeDecay:
         stats.apply(self.per_minute.scaled(elapsed_seconds / 60.0))
 
 
+@dataclass(frozen=True)
+class Food:
+    """A file Clippy can eat. The extension decides how much hunger it restores.
+
+    hunger_restored is how far the hunger stat falls (0 is full, 100 is starving).
+    """
+
+    kind: str
+    label: str
+    extensions: tuple[str, ...]
+    hunger_restored: float
+    happiness: float = 0.0
+    fatigue: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.hunger_restored < 0:
+            raise ValueError("hunger_restored must be zero or positive")
+        if not self.extensions:
+            raise ValueError("food needs at least one extension")
+
+    @property
+    def effect(self) -> Effect:
+        return Effect(
+            happiness=self.happiness,
+            hunger=-self.hunger_restored,
+            fatigue=self.fatigue,
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "label": self.label,
+            "extensions": list(self.extensions),
+            "hunger_restored": self.hunger_restored,
+            "effects": self.effect.to_dict(),
+        }
+
+
+# Light files barely help. Office documents are a real meal. An archive is a feast.
+FOOD_CATALOG: tuple[Food, ...] = (
+    Food("image", "Image", ("png", "jpg", "jpeg", "gif", "webp"), 8, happiness=18, fatigue=1),
+    Food("text", "Text file", ("txt",), 10, happiness=3, fatigue=1),
+    Food("markdown", "Markdown note", ("md",), 14, happiness=5, fatigue=1),
+    Food("program", "Program", ("exe",), 15, happiness=-12, fatigue=16),
+    Food("json", "JSON file", ("json",), 18, happiness=4, fatigue=2),
+    Food("csv", "CSV table", ("csv",), 20, happiness=3, fatigue=2),
+    Food("html", "Web page", ("html", "htm"), 22, happiness=7, fatigue=2),
+    Food("javascript", "JavaScript file", ("js",), 24, happiness=8, fatigue=3),
+    Food("python", "Python script", ("py",), 26, happiness=9, fatigue=3),
+    Food("presentation", "PowerPoint deck", ("ppt", "pptx"), 34, happiness=16, fatigue=5),
+    Food("word", "Word document", ("doc", "docx"), 40, happiness=12, fatigue=4),
+    Food("pdf", "PDF", ("pdf",), 44, happiness=6, fatigue=8),
+    Food("spreadsheet", "Excel workbook", ("xls", "xlsx"), 50, happiness=8, fatigue=6),
+    Food("archive", "Archive", ("zip", "rar", "7z"), 62, happiness=4, fatigue=14),
+)
+
+FOOD_BY_EXTENSION: dict[str, Food] = {
+    extension: food
+    for food in FOOD_CATALOG
+    for extension in food.extensions
+}
+
+
+def file_extension(filename: str) -> str:
+    """Extension of a file name, or the bare type when no dot is present."""
+
+    if not isinstance(filename, str):
+        raise FoodError("File name must be a string")
+    token = filename.strip().lower()
+    if not token:
+        raise FoodError("Choose a file to feed Clippy")
+    if token.startswith(".") and token.count(".") == 1:
+        token = token[1:]
+    elif "." in token:
+        token = token.rsplit(".", 1)[-1]
+    if not token or not token.isascii() or not token.isalnum():
+        raise FoodError("File needs an extension Clippy can eat")
+    return token
+
+
+def resolve_food(filename: str) -> Food:
+    extension = file_extension(filename)
+    food = FOOD_BY_EXTENSION.get(extension)
+    if food is None:
+        raise FoodError(f"Unknown file type '.{extension}'")
+    return food
+
+
 class Action(ABC):
     """An instant action performed on a pet."""
 
@@ -113,11 +201,56 @@ class Action(ABC):
 
 
 class EatAction(Action):
-    """Eat: hunger drops sharply and mood rises a little."""
+    """Feed Clippy a file. How much hunger it restores depends on the extension."""
 
     name = "eat"
     label = "Eat"
-    effect = Effect(happiness=10, hunger=-40, fatigue=5)
+    effect = Effect()
+
+    def __init__(self, food: Food | None = None, filename: str = "") -> None:
+        self.food = food
+        self.filename = filename
+        if food is not None:
+            self.effect = food.effect
+
+    def apply(self, stats: PetStats) -> None:
+        if self.food is None:
+            raise FoodError("Choose a file to feed Clippy")
+        super().apply(stats)
+
+    def to_dict(self) -> dict:
+        if self.food is None:
+            return {
+                "name": self.name,
+                "label": self.label,
+                "description": (
+                    'Feed Clippy a file, for example {"file": "notes.docx"}. '
+                    "Hunger restored depends on the extension. See GET /foods."
+                ),
+            }
+        payload = super().to_dict()
+        payload["file"] = self.filename
+        payload["food"] = self.food.kind
+        payload["hunger_restored"] = self.food.hunger_restored
+        return payload
+
+    def meal_dict(self) -> dict:
+        if self.food is None:
+            raise FoodError("Choose a file to feed Clippy")
+        return {
+            "file": self.filename,
+            "kind": self.food.kind,
+            "label": self.food.label,
+            "hunger_restored": self.food.hunger_restored,
+        }
+
+
+def eat_file(filename: str | None) -> EatAction:
+    if filename is None or (isinstance(filename, str) and not filename.strip()):
+        raise FoodError("Choose a file to feed Clippy")
+    food = resolve_food(filename)
+    display_name = filename.strip() if isinstance(filename, str) else filename
+    return EatAction(food, display_name)
 
 
 class PlayAction(Action):
@@ -226,6 +359,10 @@ def get_action(name: str) -> Action:
 
 class InvalidPetNameError(ValueError):
     pass
+
+
+class FoodError(ValueError):
+    """The file cannot be fed to Clippy."""
 
 
 class PetNotFoundError(LookupError):
