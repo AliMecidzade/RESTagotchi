@@ -8,6 +8,7 @@ from domain import (
     FoodError,
     InvalidPetNameError,
     Pet,
+    PetDeadError,
     PetNotFoundError,
     UnknownActionError,
 )
@@ -90,6 +91,14 @@ def create_app(
             )
         except PetNotFoundError:
             return jsonify({"error": "Pet not found"}), 404
+        except PetDeadError as exc:
+            return jsonify(
+                {
+                    "error": "Pet is dead",
+                    "cause_of_death": exc.pet.cause_of_death,
+                    "pet": pet_resource(exc.pet),
+                }
+            ), 409
         except UnknownActionError:
             return jsonify({"error": "Unknown action"}), 400
         except FoodError as exc:
