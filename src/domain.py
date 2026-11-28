@@ -5,12 +5,17 @@ from __future__ import annotations
 import uuid
 from abc import ABC
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 STAT_MIN = 0.0
 STAT_MAX = 100.0
 MAX_NAME_LENGTH = 30
+
+# Hunger and fatigue kill at 100. Happiness kills at 0: that is boredom.
+CAUSE_HUNGER = "hunger"
+CAUSE_FATIGUE = "fatigue"
+CAUSE_BOREDOM = "boredom"
 
 
 def clamp_stat(value: float) -> float:
@@ -44,9 +49,9 @@ class Effect:
 class PetStats:
     """Pet stats, each in the range 0..100.
 
-    happiness: 0 is miserable, 100 is happy.
-    hunger: 0 is full, 100 is starving.
-    fatigue: 0 is rested, 100 is exhausted.
+    happiness: 0 is bored to death, 100 is happy.
+    hunger: 0 is full, 100 is starved to death.
+    fatigue: 0 is rested, 100 is exhausted to death.
     """
 
     happiness: float = 80.0
@@ -79,11 +84,28 @@ class PetStats:
         )
 
 
+def death_cause(stats: PetStats) -> str | None:
+    """Which lethal extreme the stats have already reached, if any.
+
+    Hunger and fatigue are fatal at 100. Happiness is fatal at 0 (boredom).
+    When several are lethal at once, hunger wins, then fatigue, then boredom.
+    """
+
+    if stats.hunger >= STAT_MAX:
+        return CAUSE_HUNGER
+    if stats.fatigue >= STAT_MAX:
+        return CAUSE_FATIGUE
+    if stats.happiness <= STAT_MIN:
+        return CAUSE_BOREDOM
+    return None
+
+
 class TimeDecay:
     """How stats drift on their own while the pet is left alone.
 
     Each real minute: happiness -1, hunger +2, fatigue +1.
     Time keeps passing while the server is off; the clock starts at updated_at.
+    Drift stops at the moment a stat becomes fatal.
     """
 
     per_minute = Effect(happiness=-1.0, hunger=2.0, fatigue=1.0)
@@ -92,6 +114,42 @@ class TimeDecay:
         if elapsed_seconds <= 0:
             return
         stats.apply(self.per_minute.scaled(elapsed_seconds / 60.0))
+
+    def time_until_death(self, stats: PetStats) -> tuple[float, str] | None:
+        """Seconds until this decay kills the pet, and the cause.
+
+        None when the rates cannot push any stat into a lethal extreme.
+        """
+
+        candidates: list[tuple[float, int, str]] = []
+
+        def consider(
+            current: float,
+            per_minute: float,
+            lethal: float,
+            cause: str,
+            priority: int,
+        ) -> None:
+            already_there = (lethal == STAT_MAX and current >= STAT_MAX) or (
+                lethal == STAT_MIN and current <= STAT_MIN
+            )
+            if already_there:
+                candidates.append((0.0, priority, cause))
+                return
+            if per_minute == 0:
+                return
+            minutes = (lethal - current) / per_minute
+            if minutes < 0:
+                return
+            candidates.append((minutes * 60.0, priority, cause))
+
+        consider(stats.hunger, self.per_minute.hunger, STAT_MAX, CAUSE_HUNGER, 0)
+        consider(stats.fatigue, self.per_minute.fatigue, STAT_MAX, CAUSE_FATIGUE, 1)
+        consider(stats.happiness, self.per_minute.happiness, STAT_MIN, CAUSE_BOREDOM, 2)
+        if not candidates:
+            return None
+        seconds, _, cause = min(candidates)
+        return seconds, cause
 
 
 @dataclass(frozen=True)
@@ -290,6 +348,9 @@ class Pet:
         created_at: datetime,
         updated_at: datetime,
         decay: TimeDecay | None = None,
+        is_alive: bool = True,
+        cause_of_death: str | None = None,
+        died_at: datetime | None = None,
     ) -> None:
         self.id = pet_id
         self.name = name
@@ -297,6 +358,9 @@ class Pet:
         self.created_at = created_at
         self.updated_at = updated_at
         self.decay = decay or TimeDecay()
+        self.is_alive = is_alive
+        self.cause_of_death = cause_of_death
+        self.died_at = died_at
 
     @classmethod
     def create(cls, name: str, now: datetime) -> Pet:
@@ -309,15 +373,49 @@ class Pet:
         )
 
     def tick(self, now: datetime) -> None:
+        if not self.is_alive:
+            return
         elapsed = (now - self.updated_at).total_seconds()
+        if elapsed < 0:
+            return
+        until_death = self.decay.time_until_death(self.stats)
+        if until_death is not None:
+            seconds, cause = until_death
+            if seconds <= elapsed:
+                self.decay.apply(self.stats, seconds)
+                self.die(cause, self.updated_at + timedelta(seconds=seconds))
+                return
+        if elapsed == 0:
+            return
         self.decay.apply(self.stats, elapsed)
-        if elapsed > 0:
-            self.updated_at = now
+        self.updated_at = now
+        cause = death_cause(self.stats)
+        if cause is not None:
+            self.die(cause, now)
 
     def perform(self, action: Action, now: datetime) -> None:
         self.tick(now)
+        if not self.is_alive:
+            raise PetDeadError(self)
         action.apply(self.stats)
         self.updated_at = now
+        cause = death_cause(self.stats)
+        if cause is not None:
+            self.die(cause, now)
+
+    def die(self, cause: str, when: datetime) -> None:
+        if not self.is_alive:
+            return
+        if cause == CAUSE_HUNGER:
+            self.stats.hunger = STAT_MAX
+        elif cause == CAUSE_FATIGUE:
+            self.stats.fatigue = STAT_MAX
+        elif cause == CAUSE_BOREDOM:
+            self.stats.happiness = STAT_MIN
+        self.is_alive = False
+        self.cause_of_death = cause
+        self.died_at = when
+        self.updated_at = when
 
     def to_dict(self) -> dict:
         return {
@@ -326,16 +424,23 @@ class Pet:
             "stats": self.stats.to_dict(),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "is_alive": self.is_alive,
+            "cause_of_death": self.cause_of_death,
+            "died_at": self.died_at.isoformat() if self.died_at is not None else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> Pet:
+        died_at = data.get("died_at")
         return cls(
             pet_id=str(data["id"]),
             name=str(data["name"]),
             stats=PetStats.from_dict(data["stats"]),
             created_at=datetime.fromisoformat(data["created_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]),
+            is_alive=bool(data.get("is_alive", True)),
+            cause_of_death=data.get("cause_of_death"),
+            died_at=datetime.fromisoformat(died_at) if died_at else None,
         )
 
 
@@ -369,6 +474,12 @@ class PetNotFoundError(LookupError):
     def __init__(self, pet_id: str) -> None:
         self.pet_id = pet_id
         super().__init__(pet_id)
+
+
+class PetDeadError(RuntimeError):
+    def __init__(self, pet: Pet) -> None:
+        self.pet = pet
+        super().__init__(pet.cause_of_death or "dead")
 
 
 class UnknownActionError(ValueError):

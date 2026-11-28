@@ -8,6 +8,7 @@ from domain import (
     Clock,
     EatAction,
     Pet,
+    PetDeadError,
     PetNotFoundError,
     eat_file,
     get_action,
@@ -46,13 +47,19 @@ class PetService:
         filename: str | None = None,
     ) -> tuple[Pet, dict | None]:
         pet = self._require(pet_id)
+        if not pet.is_alive:
+            raise PetDeadError(pet)
         meal = None
         if action_name == EatAction.name:
             action = eat_file(filename)
             meal = action.meal_dict()
         else:
             action = get_action(action_name)
-        pet.perform(action, self.clock.now())
+        try:
+            pet.perform(action, self.clock.now())
+        except PetDeadError:
+            self.repository.save(pet)
+            raise
         self.repository.save(pet)
         return pet, meal
 
